@@ -1,0 +1,1 @@
+# readyscript-module
