@@ -1,10 +1,15 @@
 
-                                            
-                                            
-                                            
-                                            
-    
-                                    
+
+
+
+
+
+            <tr>
+                <td class="otitle">{$elem.__domain->getTitle()}&nbsp;&nbsp;{if $elem.__domain->getHint() != ''}<a class="help-icon" title="{$elem.__domain->getHint()|escape}">?</a>{/if}
+                </td>
+                <td>{include file=$elem.__domain->getRenderTemplate() field=$elem.__domain}</td>
+            </tr>
+
             <tr>
                 <td class="otitle">{$elem.__public_key->getTitle()}&nbsp;&nbsp;{if $elem.__public_key->getHint() != ''}<a class="help-icon" title="{$elem.__public_key->getHint()|escape}">?</a>{/if}
                 </td>

@@ -102,6 +102,11 @@ class Unitpay extends \Shop\Model\PaymentType\AbstractType
             )),
         ));*/
         $properties = new \RS\Orm\PropertyIterator(array(
+            'domain' => new Type\Varchar(array(
+                'maxLength' => 255,
+                'description' => t('DOMAIN'),
+
+            )),
             'public_key' => new Type\Varchar(array(
                 'maxLength' => 255,
                 'description' => t('PUBLIC KEY'),
@@ -169,8 +174,9 @@ class Unitpay extends \Shop\Model\PaymentType\AbstractType
 
         $this->addPostParams($params); // Добавляем параметры для POST запроса
 
-        $public_key               = $this->getOption('public_key');
-        $url = 'https://unitpay.ru/pay/' . $public_key;
+        $domain = $this->getOption('domain');
+        $public_key = $this->getOption('public_key');
+        $url = 'https://' . $domain . '/pay/' . $public_key;
 
         return $url;    // url пост запроса
     }
