@@ -1,5 +1,7 @@
 <?php
 namespace Unitpay\Model\PaymentType;
+
+use RS\Config\Loader;
 use \RS\Orm\Type;
 use \Shop\Model\Orm\Transaction;
 
@@ -8,10 +10,6 @@ use \Shop\Model\Orm\Transaction;
 */
 class Unitpay extends \Shop\Model\PaymentType\AbstractType
 {
-    const
-        PAYMENT_URL = "https://www.payanyway.ru/assistant.htm",                        // Assistant link
-        DEMO_URL    = "https://demo.moneta.ru/assistant.htm";
-
     /**
     * Возвращает название расчетного модуля (типа доставки)
     * 
@@ -58,49 +56,6 @@ class Unitpay extends \Shop\Model\PaymentType\AbstractType
     */
     function getFormObject()
     {
-        /*$properties = new \RS\Orm\PropertyIterator(array(
-            'account_id' => new Type\Varchar(array(
-                'maxLength' => 20,
-                'description' => t('Account ID - номер расширенного счёта магазина'),
-
-            )),
-            'account_code' => new Type\Varchar(array(
-                'maxLength' => 255,
-                'description' => t('Account code - код проверки целостности данных'),
-
-            )),
-            'is_demo' => new Type\Varchar(array(
-                'maxLength' => 5,
-                'description' => t('Демо режим?'),
-                'listFromArray' => array(array(
-                    '0' => t('Выключено'),
-                    '1' => t('Да, демо режим'),
-                ))
-            )),
-            'is_test' => new Type\Varchar(array(
-                'maxLength' => 5,
-                'description' => t('Тестовый режим?'),
-                'listFromArray' => array(array(
-                    '0' => t('Выключено'),
-                    '1' => t('Да, тестовый режим'),
-                ))
-            )),
-            'language' => new Type\Varchar(array(
-                'maxLength' => 5,
-                'description' => t('Язык интерфейса'),
-                'listFromArray' => array(array(
-                    0    => t('Определяется PayAnyWay'),
-                    'ru' => t('Русский'),
-                    'ua' => t('Украинский'),
-                    'en' => t('Английский'),
-                ))
-            )),
-            '__help__' => new Type\Mixed(array(
-                'description' => t(''),
-                'visible' => true,
-                'template' => '%payanyway%/form/payment/payanyway/help.tpl'
-            )),
-        ));*/
         $properties = new \RS\Orm\PropertyIterator(array(
             'domain' => new Type\Varchar(array(
                 'maxLength' => 255,
@@ -125,11 +80,11 @@ class Unitpay extends \Shop\Model\PaymentType\AbstractType
                     'en' => t('Английский'),
                 ))
             )),
-            '__help__' => new Type\Mixed(array(
+			'__help__' => new Type\MixedType(array(
                 'description' => t(''),
-                'visible' => true,
+                'visible' => true,  
                 'template' => '%unitpay%/form/payment/unitpay/help.tpl'
-            )),
+            ))
         ));
 
         return new \RS\Orm\FormObject($properties);
@@ -158,29 +113,137 @@ class Unitpay extends \Shop\Model\PaymentType\AbstractType
         $order      = $transaction->getOrder();     // Данные о заказе
 
         $inv_id     = $transaction->id;
-        $out_summ   = number_format($transaction->cost, 2, '.', '');
+        $out_summ   = $this->priceFormat($transaction->cost);
         $in_cur     = $this->getPaymentCurrency();
+		$desc = t("Оплата заказа №") . $inv_id;
+		
         if ($in_cur == 'RUR') {
             $in_cur = 'RUB';
         }
-
+		
+		//Данные плательщика
+        $user_id  = $transaction->user_id;
+        $user     = new \Users\Model\Orm\User();
+        
+        $user->load($user_id);
+        $cps_email = $user['e_mail'];
+		$cps_phone = $user['phone'];
+		
         $params = array();
-
+		
         $params['sum']                      = $out_summ;
         $params['currency']                 = $in_cur;
         $params['account']                  = $inv_id;
-        $params['desc']                     = t("Оплата заказа №").$order['order_num'];
-        $params['locale'] = $this->getOption('language', 'ru');
-
+		$params['signature'] 				= $this->generateSignature($inv_id, $in_cur, $desc, $out_summ, $this->getOption('secret_key'));
+        $params['desc']                     = $desc;
+        $params['locale'] 					= $this->getOption('language', 'ru');
+		$params['customerPhone']            = $this->phoneFormat($cps_phone);
+		$params['customerEmail']            = $cps_email;
+		$params['cashItems']                = $this->getParamsForFZ54Check($transaction);
+		
         $this->addPostParams($params); // Добавляем параметры для POST запроса
 
         $domain = $this->getOption('domain');
         $public_key = $this->getOption('public_key');
+		
         $url = 'https://' . $domain . '/pay/' . $public_key;
 
-        return $url;    // url пост запроса
+        return $url;
     }
 
+	/**
+    * Возвращает дополнительные параметры для печати чека по ФЗ-54
+    * 
+    * @param \Shop\Model\Orm\Transaction $transaction
+    * @return array|false
+    */
+    protected function getParamsForFZ54Check($transaction)
+    {
+        $in_cur     = $this->getPaymentCurrency();
+		
+        if ($in_cur == 'RUR') {
+            $in_cur = 'RUB';
+        }
+		
+		$currency = \Catalog\Model\CurrencyApi::getByUid($in_cur);
+        $currencyRatio = $currency->ratio;
+		
+        $items = array();
+		
+        if ($transaction->order_id) {
+            //Оплата заказа
+            $order = $transaction->getOrder();
+            $cart = $order->getCart();
+			
+            if ($cart) {
+                $address = $order->getAddress();
+                $tax_api = new \Shop\Model\TaxApi();
+                $products = $cart->getProductItems();
+				
+                foreach ($products as $product) {
+                    $taxes = $tax_api->getProductTaxes($product['product'], $this->transaction->getUser(), $address);
+					
+                    $items[] = array(
+                        'name' => $this->itemName($product),
+                        'count' => $product['cartitem']['amount'],
+						//'currency' => $product['cartitem']->getEntity()->getCurrencyCode(),
+						'currency' => $in_cur,
+						'nds' => $this->getTaxRates($this->getNdsCode($taxes, $address)),
+                        'price' => $this->priceFormat(($product['cartitem']['price'] - $product['cartitem']['discount']) / round($product['cartitem']['amount'])),
+						'type' => 'commodity',
+                    );
+                }
+				
+                $delivery = $cart->getCartItemsByType(\Shop\Model\Cart::TYPE_DELIVERY);
+				
+                foreach ($delivery as $delivery_item) {
+					$deliveryPrice = $delivery_item['price'] - $delivery_item['discount'];
+					
+					if(intval($deliveryPrice) > 0) {
+						$taxes = $tax_api->getDeliveryTaxes($order->getDelivery(), $this->transaction->getUser(), $address);
+						
+						$items[] = array(
+							'name' => mb_substr($delivery_item['title'], 0 , 50),
+							'count' => 1,
+							'currency' => $in_cur,
+							'nds' => $this->getTaxRates($this->getNdsCode($taxes, $address)),
+							'price' => $this->priceFormat($delivery_item['price'] - $delivery_item['discount']),
+							'type' => 'service',
+						);
+					}
+                }
+            }
+        } else {
+            //Пополнение лицевого счета
+			$shop_config = Loader::byModule($this);
+
+            $items[] = array(
+                'name' => $transaction->reason,
+                'count' => 1,
+                'price' => $this->priceFormat($transaction->cost),
+				'currency' => $in_cur,
+				'type' => 'service',
+            );
+        }
+		
+        return $this->cashItems($items);
+    }
+	
+	function itemName($product)
+    {
+        if ($product['product']['barcode']){
+            $result = $product['product']['barcode'];
+        }
+		
+        $result = $result.' '.$product['product']['title'];
+		
+        if (iconv_strlen($result)>64){
+            $result = iconv_substr($result, 0 , 61 , 'UTF-8' );
+            $result = $result.'...';
+        }
+		
+		return $result;
+    }
 
     /**
     * Получает трех символьный код базовой валюты в которой ведётся оплата
@@ -287,12 +350,11 @@ class Unitpay extends \Shop\Model\PaymentType\AbstractType
 
     function check( $params, \Shop\Model\Orm\Transaction $transaction )
     {
-
         $order = $transaction->getOrder();
-        $sum = $order->getTotalPrice(false, true);
         $ISOCode = $order->getMyCurrency()->title;
-
-        if ((float)$sum != (float)$params['orderSum']) {
+		$sum   = $this->priceFormat($transaction->cost);
+		
+        if ((float) $this->priceFormat($sum) != (float) $this->priceFormat($params['orderSum'])) {
             $result = array('error' =>
                 array('message' => 'не совпадает сумма заказа')
             );
@@ -311,12 +373,11 @@ class Unitpay extends \Shop\Model\PaymentType\AbstractType
 
     function pay( $params, \Shop\Model\Orm\Transaction $transaction )
     {
-
         $order = $transaction->getOrder();
-        $sum = $order->getTotalPrice(false, true);
         $ISOCode = $order->getMyCurrency()->title;
-
-        if ((float)$sum != (float)$params['orderSum']) {
+		$sum   = $this->priceFormat($transaction->cost);
+		
+        if ((float) $this->priceFormat($sum) != (float) $this->priceFormat($params['orderSum'])) {
             $result = array('error' =>
                 array('message' => 'не совпадает сумма заказа')
             );
@@ -341,6 +402,54 @@ class Unitpay extends \Shop\Model\PaymentType\AbstractType
         );
         return $result;
     }
+	
+    /**
+     * @param $items
+     * @return string
+     */
+    public function cashItems($items) {
+        return base64_encode(json_encode($items));
+    }
+
+    /**
+     * @param $rate
+     * @return string
+     */
+    function getTaxRates($code){
+        switch ($code){
+            case 'nds_110':
+                $vat = 'vat10';
+                break;
+            case 'nds_120':
+                $vat = 'vat20';
+                break;
+            case 'nds_0':
+                $vat = 'vat0';
+                break;
+            default:
+                $vat = 'none';
+        }
+
+        return $vat;
+    }
+
+    /**
+     * @param $value
+     * @return string
+     */
+    public function priceFormat($value) {
+        return number_format($value, 2, '.', '');
+    }
+
+    /**
+     * @param $value
+     * @return string
+     */
+    public function phoneFormat($value) {
+        return  preg_replace('/\D/', '', $value);
+    }
+	
+	
     function getSignature($method, array $params, $secretKey)
     {
         ksort($params);
@@ -350,6 +459,24 @@ class Unitpay extends \Shop\Model\PaymentType\AbstractType
         array_unshift($params, $method);
         return hash('sha256', join('{up}', $params));
     }
+	
+	/**
+     * @param $order_id
+     * @param $currency
+     * @param $desc
+     * @param $sum
+     * @return string
+     */
+    public function generateSignature($order_id, $currency, $desc, $sum, $secretKey) {
+        return hash('sha256', join('{up}', array(
+            $order_id,
+            $currency,
+            $desc,
+            $sum ,
+            $secretKey
+        )));
+    }
+	
     function verifySignature($params, $method, $secret)
     {
         return $params['signature'] == $this->getSignature($method, $params, $secret);
